@@ -19,6 +19,8 @@ ENV/
 *.nbconvert.ipynb
 
 # Data caches / temporary files
+data/processed/*
+!data/processed/multi_city_recommendation_features.csv
 data/raw/*
 !data/raw/.gitkeep
 data/raw/multi_city_cache/
