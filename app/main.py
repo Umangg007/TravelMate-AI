@@ -6,7 +6,7 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from src.data_loader import load_places, available_cities, load_embeddings
+from src.data_loader import load_places, available_cities
 from src.recommender import TravelRecommender
 from src.itinerary import generate_itinerary
 
@@ -20,13 +20,6 @@ DATA_PATH = (
     / "multi_city_recommendation_features.csv"
 )
 
-EMBEDDING_PATH = (
-    PROJECT_ROOT
-    / "data"
-    / "embeddings"
-    / "multi_city_place_embeddings.npy"
-)
-
 MAX_DAY_MINUTES = 7 * 60
 DEFAULT_DAYS = 3
 DEFAULT_TOP_N = 5
@@ -34,14 +27,11 @@ DEFAULT_TOP_N = 5
 
 places = load_places(DATA_PATH)
 
-if EMBEDDING_PATH.exists():
-    embeddings = load_embeddings(EMBEDDING_PATH)
-else:
-    embeddings = None
-
+# Memory-safe production mode:
+# The previous SentenceTransformer embedding file is not loaded.
+# The recommender now builds a lightweight TF-IDF + SVD semantic space.
 recommender = TravelRecommender(
     df=places,
-    place_embeddings=embeddings,
 )
 
 
@@ -56,13 +46,49 @@ def infer_activity_type(text: str) -> str:
         return "trekking"
     if "viewpoint" in text or "view point" in text:
         return "viewpoint"
-    if any(x in text for x in ["temple", "church", "mosque", "gurudwara", "monastery"]):
+    if any(
+        x in text
+        for x in [
+            "temple",
+            "church",
+            "mosque",
+            "gurudwara",
+            "monastery",
+        ]
+    ):
         return "religious_site"
-    if any(x in text for x in ["fort", "palace", "museum", "heritage", "castle"]):
+    if any(
+        x in text
+        for x in [
+            "fort",
+            "palace",
+            "museum",
+            "heritage",
+            "castle",
+        ]
+    ):
         return "heritage"
-    if any(x in text for x in ["market", "bazaar", "mall", "shopping"]):
+    if any(
+        x in text
+        for x in [
+            "market",
+            "bazaar",
+            "mall",
+            "shopping",
+        ]
+    ):
         return "shopping"
-    if any(x in text for x in ["beach", "lake", "river", "park", "forest", "garden"]):
+    if any(
+        x in text
+        for x in [
+            "beach",
+            "lake",
+            "river",
+            "park",
+            "forest",
+            "garden",
+        ]
+    ):
         return "nature"
     if "snow" in text or "ski" in text:
         return "winter_experience"
@@ -88,16 +114,30 @@ def estimate_visit_minutes(activity_type: str) -> int:
 def estimate_price_level(text: str) -> int:
     text = str(text).lower()
 
-    if "rafting" in text or "ski" in text or "adventure" in text:
+    if (
+        "rafting" in text
+        or "ski" in text
+        or "adventure" in text
+    ):
         return 3
 
-    if any(x in text for x in ["shopping", "market", "bazaar", "mall"]):
+    if any(
+        x in text
+        for x in [
+            "shopping",
+            "market",
+            "bazaar",
+            "mall",
+        ]
+    ):
         return 2
 
     return 1
 
 
-def add_planning_metadata(candidates: pd.DataFrame) -> pd.DataFrame:
+def add_planning_metadata(
+    candidates: pd.DataFrame,
+) -> pd.DataFrame:
     result = candidates.copy()
 
     planning_text = (
@@ -146,8 +186,11 @@ class TravelRequest(BaseModel):
 
 app = FastAPI(
     title="TravelMate AI API",
-    description="City-aware AI travel recommendation and itinerary backend.",
-    version="2.0.0",
+    description=(
+        "City-aware AI travel recommendation "
+        "and itinerary backend."
+    ),
+    version="2.1.0",
 )
 
 
@@ -155,8 +198,9 @@ app = FastAPI(
 def root():
     return {
         "app": "TravelMate AI",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "running",
+        "mode": "memory_safe",
         "supported_cities": available_cities(places),
     }
 
@@ -167,7 +211,7 @@ def health():
         "status": "healthy",
         "places_loaded": len(places),
         "cities_loaded": len(available_cities(places)),
-        "embedding_rows": len(recommender.place_embeddings),
+        "semantic_engine": "TF-IDF + TruncatedSVD",
     }
 
 
@@ -232,7 +276,10 @@ def recommend(request: TravelRequest):
 def itinerary(request: TravelRequest):
     try:
         candidate_count = min(
-            max(request.top_n, request.days * 4),
+            max(
+                request.top_n,
+                request.days * 4,
+            ),
             len(places),
         )
 

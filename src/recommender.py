@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
+from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sentence_transformers import SentenceTransformer
 
 
 FEATURE_COLUMNS = [
@@ -20,7 +18,6 @@ FEATURE_COLUMNS = [
     "family",
 ]
 
-
 BASE_WEIGHTS = {
     "structured": 0.25,
     "tfidf": 0.25,
@@ -31,13 +28,22 @@ BASE_WEIGHTS = {
 
 
 class TravelRecommender:
-    """Shared city-aware personalized hybrid travel recommender."""
+    """
+    Shared city-aware personalized hybrid travel recommender.
+
+    Render memory-safe version:
+    - Does NOT import or load SentenceTransformer/PyTorch.
+    - Uses TF-IDF + TruncatedSVD as a lightweight semantic proxy.
+    - Keeps the personalized hybrid-ranking logic.
+    - Existing precomputed SentenceTransformer embeddings are accepted
+      for API compatibility but are intentionally not loaded/used.
+    """
 
     def __init__(
         self,
-        df,
+        df: pd.DataFrame,
         place_embeddings=None,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_name=None,
     ):
         self.df = df.copy()
 
@@ -50,10 +56,7 @@ class TravelRecommender:
             "reviews",
         }
 
-        missing = sorted(
-            required - set(self.df.columns)
-        )
-
+        missing = sorted(required - set(self.df.columns))
         if missing:
             raise ValueError(
                 f"Missing recommender columns: {missing}"
@@ -76,9 +79,7 @@ class TravelRecommender:
             if feature not in self.df.columns:
                 self.df[feature] = 0
 
-        self.df["rating_score"] = (
-            self._minmax(self.df["rating"])
-        )
+        self.df["rating_score"] = self._minmax(self.df["rating"])
 
         review_values = (
             pd.to_numeric(
@@ -89,19 +90,15 @@ class TravelRecommender:
             .clip(lower=0)
         )
 
-        self.df["popularity_score"] = (
-            self._minmax(
-                np.log1p(review_values)
-            )
+        self.df["popularity_score"] = self._minmax(
+            np.log1p(review_values)
         )
 
         self.structured_matrix = (
-            self.df[
-                FEATURE_COLUMNS
-            ]
+            self.df[FEATURE_COLUMNS]
             .fillna(0)
             .astype(float)
-            .to_numpy()
+            .to_numpy(dtype=np.float32)
         )
 
         self.df["recommendation_text"] = (
@@ -114,49 +111,42 @@ class TravelRecommender:
             + self.df["travel_tags"]
         ).str.lower()
 
-        self.tfidf_vectorizer = (
-            TfidfVectorizer(
-                stop_words="english",
-                ngram_range=(1, 2),
-            )
+        # Lightweight text model.
+        self.tfidf_vectorizer = TfidfVectorizer(
+            stop_words="english",
+            ngram_range=(1, 2),
+            max_features=5000,
+            dtype=np.float32,
         )
 
-        self.tfidf_matrix = (
-            self.tfidf_vectorizer.fit_transform(
-                self.df[
-                    "recommendation_text"
-                ]
-            )
+        self.tfidf_matrix = self.tfidf_vectorizer.fit_transform(
+            self.df["recommendation_text"]
         )
 
-        self.semantic_model = (
-            SentenceTransformer(model_name)
-        )
+        # Lightweight semantic proxy.
+        # For a small catalogue, 32 components is enough and uses very little RAM.
+        n_features = self.tfidf_matrix.shape[1]
+        max_components = max(1, min(32, n_features - 1))
 
-        if place_embeddings is None:
-
-            self.place_embeddings = (
-                self.semantic_model.encode(
-                    self.df[
-                        "recommendation_text"
-                    ].tolist(),
-                    normalize_embeddings=True,
-                    show_progress_bar=True,
-                )
-            )
-
+        if self.tfidf_matrix.shape[0] <= 2 or max_components < 1:
+            self.svd_model = None
+            self.semantic_matrix = self.tfidf_matrix
         else:
-
-            if len(place_embeddings) != len(
-                self.df
-            ):
-                raise ValueError(
-                    "Embedding row count does not match dataset."
-                )
-
-            self.place_embeddings = (
-                place_embeddings
+            self.svd_model = TruncatedSVD(
+                n_components=max_components,
+                random_state=42,
             )
+            self.semantic_matrix = self.svd_model.fit_transform(
+                self.tfidf_matrix
+            ).astype(np.float32)
+
+        # Kept for backward compatibility with the existing API.
+        # Do not retain the large numpy embedding array in production memory.
+        self.place_embeddings = np.empty(
+            (0, 0),
+            dtype=np.float32,
+        )
+        self.model_name = model_name
 
     @staticmethod
     def _minmax(series):
@@ -173,14 +163,11 @@ class TravelRecommender:
 
         if low == high:
             return pd.Series(
-                np.ones(len(values)),
+                np.ones(len(values), dtype=np.float32),
                 index=values.index,
             )
 
-        return (
-            (values - low)
-            / (high - low)
-        )
+        return (values - low) / (high - low)
 
     @staticmethod
     def get_personalized_weights(
@@ -189,10 +176,7 @@ class TravelRecommender:
     ):
         values = {
             feature: float(
-                preferences.get(
-                    feature,
-                    0.0,
-                )
+                preferences.get(feature, 0.0)
             )
             for feature in FEATURE_COLUMNS
         }
@@ -214,18 +198,9 @@ class TravelRecommender:
         )
 
         weights = BASE_WEIGHTS.copy()
-
-        weights["structured"] += (
-            structured_boost
-        )
-
-        weights["semantic"] -= (
-            structured_boost / 2
-        )
-
-        weights["tfidf"] -= (
-            structured_boost / 2
-        )
+        weights["structured"] += structured_boost
+        weights["semantic"] -= structured_boost / 2
+        weights["tfidf"] -= structured_boost / 2
 
         return weights
 
@@ -235,54 +210,40 @@ class TravelRecommender:
         preferences,
     ):
         matrix = (
-            result[
-                FEATURE_COLUMNS
-            ]
+            result[FEATURE_COLUMNS]
             .fillna(0)
             .astype(float)
-            .to_numpy()
+            .to_numpy(dtype=np.float32)
         )
 
         preference_vector = np.array(
             [
                 float(
-                    preferences.get(
-                        feature,
-                        0.0,
-                    )
+                    preferences.get(feature, 0.0)
                 )
                 for feature in FEATURE_COLUMNS
             ],
-            dtype=float,
+            dtype=np.float32,
         )
 
-        numerator = (
-            matrix @ preference_vector
-        )
+        numerator = matrix @ preference_vector
 
         denominator = (
-            np.linalg.norm(
-                matrix,
-                axis=1,
-            )
-            * np.linalg.norm(
-                preference_vector
-            )
+            np.linalg.norm(matrix, axis=1)
+            * np.linalg.norm(preference_vector)
         )
 
-        result = np.zeros(
+        result_scores = np.zeros(
             len(matrix),
-            dtype=float,
+            dtype=np.float32,
         )
 
         valid = denominator > 0
-
-        result[valid] = (
-            numerator[valid]
-            / denominator[valid]
+        result_scores[valid] = (
+            numerator[valid] / denominator[valid]
         )
 
-        return result
+        return result_scores
 
     def recommend(
         self,
@@ -304,11 +265,7 @@ class TravelRecommender:
             )
 
         preference_values = [
-            float(
-                user_preferences[
-                    feature
-                ]
-            )
+            float(user_preferences[feature])
             for feature in FEATURE_COLUMNS
         ]
 
@@ -327,11 +284,10 @@ class TravelRecommender:
         )
 
         positions = np.flatnonzero(
-            (
-                self.df["city"]
-                .str.lower()
-                .eq(requested_city)
-            ).to_numpy()
+            self.df["city"]
+            .str.lower()
+            .eq(requested_city)
+            .to_numpy()
         )
 
         if len(positions) == 0:
@@ -340,86 +296,78 @@ class TravelRecommender:
                 .unique()
                 .tolist()
             )
-
             raise ValueError(
                 f"Destination '{destination}' not found. "
                 f"Available: {available}"
             )
 
         result = (
-            self.df
-            .iloc[positions]
+            self.df.iloc[positions]
             .copy()
             .reset_index(drop=True)
         )
 
         preference_vector = np.array(
             preference_values,
-            dtype=float,
+            dtype=np.float32,
         ).reshape(1, -1)
 
         result["structured_score"] = (
             cosine_similarity(
                 preference_vector,
-                self.structured_matrix[
-                    positions
-                ],
-            ).flatten()
+                self.structured_matrix[positions],
+            )
+            .flatten()
         )
 
         query_text = (
             f"{destination}. {query}"
         ).lower()
 
-        query_tfidf = (
-            self.tfidf_vectorizer.transform(
-                [query_text]
-            )
+        query_tfidf = self.tfidf_vectorizer.transform(
+            [query_text]
         )
 
         result["tfidf_score"] = (
             cosine_similarity(
                 query_tfidf,
-                self.tfidf_matrix[
-                    positions
-                ],
-            ).flatten()
+                self.tfidf_matrix[positions],
+            )
+            .flatten()
         )
 
-        query_embedding = (
-            self.semantic_model.encode(
-                [query_text],
-                normalize_embeddings=True,
-            )
-        )
+        # Lightweight semantic score using the same TF-IDF -> SVD space.
+        if self.svd_model is None:
+            query_semantic = query_tfidf
+        else:
+            query_semantic = (
+                self.svd_model.transform(
+                    query_tfidf
+                )
+            ).astype(np.float32)
 
         result["semantic_score"] = (
             cosine_similarity(
-                query_embedding,
-                self.place_embeddings[
-                    positions
-                ],
-            ).flatten()
-        )
-
-        weights = (
-            self.get_personalized_weights(
-                user_preferences
+                query_semantic,
+                self.semantic_matrix[positions],
             )
+            .flatten()
         )
 
-        result[
-            "personalized_structured_score"
-        ] = self._personalized_structured_score(
-            result,
-            user_preferences,
+        weights = self.get_personalized_weights(
+            user_preferences
+        )
+
+        result["personalized_structured_score"] = (
+            self._personalized_structured_score(
+                result,
+                user_preferences,
+            )
         )
 
         result["final_score"] = (
             weights["structured"]
-            * result[
-                "personalized_structured_score"
-            ]
+            * result["personalized_structured_score"]
             + weights["tfidf"]
             * result["tfidf_score"]
             + weights["semantic"]
@@ -441,7 +389,7 @@ class TravelRecommender:
         )
 
 
-def available_cities(df):
+def available_cities(df: pd.DataFrame):
     return sorted(
         df["city"]
         .dropna()
