@@ -321,31 +321,54 @@ if result:
         # Day legend.
         legend_html = """
         <div style="
-            position:fixed;
-            bottom:25px;
-            left:25px;
-            z-index:9999;
-            background:white;
-            padding:10px 12px;
-            border:1px solid #ccc;
-            border-radius:8px;
-            box-shadow:0 2px 7px rgba(0,0,0,.20);
-            font-family:Arial,sans-serif;
-            font-size:13px;
-        "><b>Trip Days</b><br>
+            position: fixed;
+            bottom: 25px;
+            left: 25px;
+            z-index: 9999;
+            background-color: white;
+            color: #222222;
+            padding: 12px 16px;
+            border: 1px solid #bbbbbb;
+            border-radius: 10px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.25);
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            min-width: 110px;
+        ">
+            <div style="
+                font-weight: 700;
+                font-size: 15px;
+                margin-bottom: 8px;
+                color: #111111;
+            ">
+                Trip Days
+            </div>
         """
-        for day in sorted({int(item["day"]) for item in map_points}):
+        for day in legend_items:
             legend_html += f"""
-            <div style="margin-top:5px;">
-                <span style="display:inline-block;width:12px;height:12px;"
-                      "border-radius:50%;background:{marker_color(day)};"
-                      "margin-right:6px;"></span>
+            <div style="
+                display: flex;
+                align-items: center;
+                margin-top: 6px;
+                color: #222222;
+                font-weight: 500;
+            ">
+                <span style="
+                    display: inline-block;
+                    width: 13px;
+                    height: 13px;
+                    border-radius: 50%;
+                    background: {marker_color(day)};
+                    margin-right: 8px;
+                    border: 1px solid rgba(0,0,0,0.15);
+                "></span>
                 Day {day}
             </div>
             """
         legend_html += "</div>"
-        travel_map.get_root().html.add_child(folium.Element(legend_html))
-
+        travel_map.get_root().html.add_child(
+            folium.Element(legend_html)
+        )
         st_folium(travel_map, height=600, width=None)
     else:
         st.info("Map coordinates are unavailable for this itinerary.")
